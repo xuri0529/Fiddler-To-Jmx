@@ -228,6 +228,7 @@ class HarToJmxConverter:
         self.value_to_var.clear()
 
         for source_idx, entry in enumerate(self.entries):
+            step_no = source_idx + 1  # Align variable suffix with sampler Step numbering
             resp = entry.get("response", {})
             content = resp.get("content", {})
             text = self._decode_response_text(content)
@@ -255,7 +256,7 @@ class HarToJmxConverter:
 
                 if name in self.HEADER_EXTRACT_KEYS and value and self._is_dynamic_value(value):
                     if value not in self.value_to_var:
-                        var_name = f"header_{name.replace('-', '_')}_{source_idx}"
+                        var_name = f"header_{name.replace('-', '_')}_{step_no}"
                         var_name = self._normalize_var_name(var_name)
                         regex_expr = rf"(?i){re.escape(name)}:\s*([^\r\n]+)"
                         self.dynamic_params.append(
@@ -273,7 +274,7 @@ class HarToJmxConverter:
                     cookie_val = m.group(1).strip()
                     if cookie_val and self._is_dynamic_value(cookie_val):
                         if cookie_val not in self.value_to_var:
-                            var_name = f"cookie_{cookie_key}_{source_idx}"
+                            var_name = f"cookie_{cookie_key}_{step_no}"
                             var_name = self._normalize_var_name(var_name)
                             regex_expr = rf"{re.escape(cookie_key)}=([^;]+)"
                             self.dynamic_params.append(
@@ -284,6 +285,8 @@ class HarToJmxConverter:
     def _extract_from_html(self, text: str, source_idx: int):
         if not text:
             return
+
+        step_no = source_idx + 1
 
         hidden_input_re = re.compile(
             r"<input[^>]+type=[\"']?hidden[\"']?[^>]*>",
@@ -301,7 +304,7 @@ class HarToJmxConverter:
             val = value_m.group(1)
             if self._should_extract_key(key) and self._is_dynamic_value(val):
                 if val not in self.value_to_var:
-                    var_name = f"html_{re.sub(r'[^\w]', '_', key).strip('_')}_{source_idx}"
+                    var_name = f"html_{re.sub(r'[^\w]', '_', key).strip('_')}_{step_no}"
                     var_name = self._normalize_var_name(var_name)
                     regex_expr = rf"name=[\"']{re.escape(key)}[\"'][^>]*value=[\"']([^\"']+)"
                     self.dynamic_params.append((val, var_name, source_idx, "regex", regex_expr))
@@ -318,13 +321,15 @@ class HarToJmxConverter:
             val = content_m.group(1)
             if self._should_extract_key(key) and self._is_dynamic_value(val):
                 if val not in self.value_to_var:
-                    var_name = f"meta_{re.sub(r'[^\w]', '_', key).strip('_')}_{source_idx}"
+                    var_name = f"meta_{re.sub(r'[^\w]', '_', key).strip('_')}_{step_no}"
                     var_name = self._normalize_var_name(var_name)
                     regex_expr = rf"name=[\"']{re.escape(key)}[\"'][^>]*content=[\"']([^\"']+)"
                     self.dynamic_params.append((val, var_name, source_idx, "regex", regex_expr))
                     self.value_to_var[val] = var_name
 
     def _extract_from_json(self, json_data, source_idx: int):
+        step_no = source_idx + 1
+
         def traverse(obj, path=""):
             if isinstance(obj, dict):
                 for k, v in obj.items():
@@ -340,7 +345,7 @@ class HarToJmxConverter:
                 val_str = str(obj).strip()
                 if self._is_dynamic_value(val_str):
                     safe_path = re.sub(r"[^\w]", "_", path).strip("_")
-                    var_name = f"json_{safe_path}_{source_idx}"
+                    var_name = f"json_{safe_path}_{step_no}"
                     var_name = self._normalize_var_name(var_name)
                     if val_str not in self.value_to_var:
                         json_path = f"$.{path}"
@@ -510,7 +515,7 @@ class HarToJmxConverter:
         path_for_sampler = full_path if method == "POST" else original_path
         replaced_path = self._replace_dynamic_values(path_for_sampler, idx)
 
-        testname = f"Step {idx + 1}: {method} {full_url}"
+        testname = f"{idx + 1}: {method} {full_url}"
         sampler = etree.Element(
             "HTTPSamplerProxy",
             guiclass="HttpTestSampleGui",
