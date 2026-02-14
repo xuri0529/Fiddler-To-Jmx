@@ -8,7 +8,7 @@
 - GET 与表单参数默认开启 URL Encode。
 
 使用方法：
-    C:/Python313/python.exe C:/Users/ww/Downloads/har_to_jmeter.py <har_file> [output_path_or_dir]
+    C:/Python313/python.exe C:/Users/www/Downloads/har_to_jmeter.py <har_file> [output_path_or_dir]
 
 输出说明：
 - 未指定输出路径时，自动生成 har_converted_YYYYMMDDHHMMSS.jmx。
@@ -881,3 +881,4 @@ if __name__ == "__main__":
     output_path = sys.argv[2] if len(sys.argv) >= 3 else None
     converter = HarToJmxConverter(har_path)
     converter.convert(output_path)
+
