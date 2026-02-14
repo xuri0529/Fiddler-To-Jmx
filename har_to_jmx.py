@@ -8,7 +8,7 @@
 - GET 与表单参数默认开启 URL Encode。
 
 使用方法：
-    C:/Python313/python.exe C:/Users/www/Downloads/har_to_jmeter.py <har_file> [output_path_or_dir]
+    C:/Python313/python.exe C:/Users/ww/Downloads/har_to_jmeter.py <har_file> [output_path_or_dir]
 
 输出说明：
 - 未指定输出路径时，自动生成 har_converted_YYYYMMDDHHMMSS.jmx。
@@ -48,12 +48,6 @@ class HarToJmxConverter:
     HEADER_EXTRACT_KEYS = {
         "x-csrf-token", "x-xsrf-token", "x-auth-token",
         "authorization", "x-session-id"
-    }
-    SKIP_HEADER_NAMES = {
-        "cookie",
-        "host",
-        "connection",
-        "accept-encoding"
     }
     HTML_KEY_HINTS = {
         "token", "csrf", "xsrf", "session", "sid", "auth", "nonce",
@@ -366,14 +360,8 @@ class HarToJmxConverter:
         sorted_params = sorted(self.dynamic_params, key=lambda x: len(x[0]), reverse=True)
         for value, var_name, source_idx, *_ in sorted_params:
             if source_idx < current_idx and value in content:
-                if value.isalnum():
-                    pattern = rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])"
-                else:
-                    pattern = re.escape(value)
-                new_content, count = re.subn(pattern, f"${{{var_name}}}", content)
-                if count:
-                    content = new_content
-                    self.used_vars.add(var_name)
+                content = content.replace(value, f"${{{var_name}}}")
+                self.used_vars.add(var_name)
         return content
 
     def _replace_dynamic_in_json_text(self, text: str, current_idx: int) -> str:
@@ -798,7 +786,7 @@ class HarToJmxConverter:
                 for h in headers:
                     name = h.get("name", "").strip()
                     value = h.get("value", "").strip()
-                    if name and name.strip().lower() not in self.SKIP_HEADER_NAMES:
+                    if name:
                         replaced_value = self._replace_dynamic_values(value, idx)
                         header_elem = etree.SubElement(header_coll, "elementProp", name="", elementType="Header")
                         etree.SubElement(header_elem, "stringProp", name="Header.name").text = name
