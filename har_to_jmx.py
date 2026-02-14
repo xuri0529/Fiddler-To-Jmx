@@ -8,7 +8,7 @@
 - GET 与表单参数默认开启 URL Encode。
 
 使用方法：
-    C:/Python313/python.exe C:/Users/ww/Downloads/har_to_jmeter.py <har_file> [output_path_or_dir]
+    C:/Python313/python.exe C:/Users/www/Downloads/har_to_jmeter.py <har_file> [output_path_or_dir]
 
 输出说明：
 - 未指定输出路径时，自动生成 har_converted_YYYYMMDDHHMMSS.jmx。
@@ -48,6 +48,12 @@ class HarToJmxConverter:
     HEADER_EXTRACT_KEYS = {
         "x-csrf-token", "x-xsrf-token", "x-auth-token",
         "authorization", "x-session-id"
+    }
+    SKIP_HEADER_NAMES = {
+        "cookie",
+        "host",
+        "connection",
+        "accept-encoding"
     }
     HTML_KEY_HINTS = {
         "token", "csrf", "xsrf", "session", "sid", "auth", "nonce",
@@ -360,8 +366,14 @@ class HarToJmxConverter:
         sorted_params = sorted(self.dynamic_params, key=lambda x: len(x[0]), reverse=True)
         for value, var_name, source_idx, *_ in sorted_params:
             if source_idx < current_idx and value in content:
-                content = content.replace(value, f"${{{var_name}}}")
-                self.used_vars.add(var_name)
+                if value.isalnum():
+                    pattern = rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])"
+                else:
+                    pattern = re.escape(value)
+                new_content, count = re.subn(pattern, f"${{{var_name}}}", content)
+                if count:
+                    content = new_content
+                    self.used_vars.add(var_name)
         return content
 
     def _replace_dynamic_in_json_text(self, text: str, current_idx: int) -> str:
@@ -633,10 +645,9 @@ class HarToJmxConverter:
             etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBodyAsDocument").text = "false"
             etree.SubElement(extractor, "boolProp", name="RegexExtractor.useUrl").text = "false"
             etree.SubElement(extractor, "boolProp", name="RegexExtractor.useCode").text = "false"
-
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1"
+            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
             etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
@@ -658,7 +669,7 @@ class HarToJmxConverter:
 
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1"
+            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
             etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
@@ -680,7 +691,7 @@ class HarToJmxConverter:
 
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1"
+            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
             etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
             etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
@@ -755,8 +766,16 @@ class HarToJmxConverter:
         etree.SubElement(thread_group, "stringProp", name="ThreadGroup.num_threads").text = "1"
         etree.SubElement(thread_group, "stringProp", name="ThreadGroup.ramp_time").text = "1"
         etree.SubElement(thread_group, "stringProp", name="ThreadGroup.on_sample_error").text = "continue"
-        etree.SubElement(thread_group, "elementProp", name="ThreadGroup.main_controller", elementType="LoopController")
-        loop_ctrl = etree.SubElement(thread_group, "elementProp", name="LoopController", elementType="LoopController")
+        loop_ctrl = etree.SubElement(
+            thread_group,
+            "elementProp",
+            name="ThreadGroup.main_controller",
+            elementType="LoopController",
+            guiclass="LoopControlPanel",
+            testclass="LoopController",
+            testname="Loop Controller",
+            enabled="true"
+        )
         etree.SubElement(loop_ctrl, "boolProp", name="LoopController.continue_forever").text = "false"
         etree.SubElement(loop_ctrl, "stringProp", name="LoopController.loops").text = "1"
         thread_group_ht = etree.SubElement(test_plan_ht, "hashTree")
@@ -779,7 +798,7 @@ class HarToJmxConverter:
                 for h in headers:
                     name = h.get("name", "").strip()
                     value = h.get("value", "").strip()
-                    if name:
+                    if name and name.strip().lower() not in self.SKIP_HEADER_NAMES:
                         replaced_value = self._replace_dynamic_values(value, idx)
                         header_elem = etree.SubElement(header_coll, "elementProp", name="", elementType="Header")
                         etree.SubElement(header_elem, "stringProp", name="Header.name").text = name
@@ -795,6 +814,57 @@ class HarToJmxConverter:
             for assertion in self._create_assertions():
                 sampler_ht.append(assertion)
                 etree.SubElement(sampler_ht, "hashTree")
+
+        debug_sampler = etree.SubElement(
+            thread_group_ht, "DebugSampler",
+            guiclass="TestBeanGUI",
+            testclass="DebugSampler",
+            testname="Debug Sampler",
+            enabled="true"
+        )
+        etree.SubElement(thread_group_ht, "hashTree")
+
+        results_tree = etree.SubElement(
+            thread_group_ht, "ResultCollector",
+            guiclass="ViewResultsFullVisualizer",
+            testclass="ResultCollector",
+            testname="View Results Tree",
+            enabled="true"
+        )
+        etree.SubElement(results_tree, "boolProp", name="ResultCollector.error_logging").text = "false"
+        save_config = etree.SubElement(results_tree, "objProp")
+        etree.SubElement(save_config, "name").text = "saveConfig"
+        save_value = etree.SubElement(save_config, "value", **{"class": "SampleSaveConfiguration"})
+        etree.SubElement(save_value, "time").text = "true"
+        etree.SubElement(save_value, "latency").text = "true"
+        etree.SubElement(save_value, "timestamp").text = "true"
+        etree.SubElement(save_value, "success").text = "true"
+        etree.SubElement(save_value, "label").text = "true"
+        etree.SubElement(save_value, "code").text = "true"
+        etree.SubElement(save_value, "message").text = "true"
+        etree.SubElement(save_value, "threadName").text = "true"
+        etree.SubElement(save_value, "dataType").text = "true"
+        etree.SubElement(save_value, "encoding").text = "false"
+        etree.SubElement(save_value, "assertions").text = "true"
+        etree.SubElement(save_value, "subresults").text = "true"
+        etree.SubElement(save_value, "responseData").text = "false"
+        etree.SubElement(save_value, "samplerData").text = "false"
+        etree.SubElement(save_value, "xml").text = "false"
+        etree.SubElement(save_value, "fieldNames").text = "true"
+        etree.SubElement(save_value, "responseHeaders").text = "false"
+        etree.SubElement(save_value, "requestHeaders").text = "false"
+        etree.SubElement(save_value, "responseDataOnError").text = "false"
+        etree.SubElement(save_value, "saveAssertionResultsFailureMessage").text = "true"
+        etree.SubElement(save_value, "assertionsResultsToSave").text = "0"
+        etree.SubElement(save_value, "bytes").text = "true"
+        etree.SubElement(save_value, "sentBytes").text = "true"
+        etree.SubElement(save_value, "url").text = "true"
+        etree.SubElement(save_value, "threadCounts").text = "true"
+        etree.SubElement(save_value, "idleTime").text = "true"
+        etree.SubElement(save_value, "connectTime").text = "true"
+        etree.SubElement(results_tree, "stringProp", name="filename").text = ""
+        etree.SubElement(thread_group_ht, "hashTree")
+
 
         if not output_path:
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
