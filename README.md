@@ -34,4 +34,12 @@
     - HAR 解析统计：总请求数、过滤静态请求数、保留请求数。
     - 动态参数统计：提取数量、实际被引用数量。
     - 最终生成的 JMX 路径与包含的请求数。
+
+注意事项：
+- JSON 请求体以 raw body 方式写入，不做 URL Encode。
+- 动态参数仅在后续请求中被引用时才会生成对应提取器。
+- 如需扩展动态参数提取规则，可调整 COOKIE_EXTRACT_KEYS/HEADER_EXTRACT_KEYS/HTML_KEY_HINTS。
+- 正则表达式提取器的模版字符串有漏洞需转换之后检查。
+- 在线程组下请求的最后添加 View Results Tree、Debug Sampler，查看 View Results Tree 中 Debug Sampler 的响应值中所有变量及关联的动态值是否正确提取。
+- 正则、边界等处理器中的 Default Value 必须勾选 Use empty value，否则提取失败时会使用默认值，导致后续请求无法正确关联动态参数。
 """
