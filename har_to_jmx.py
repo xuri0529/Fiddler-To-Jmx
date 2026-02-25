@@ -1,7 +1,7 @@
 """HAR 转 JMeter JMX 转换脚本
 
 功能描述：
-- 该脚本将 Fiddler 导出的 HAR 转换成可直接运行的 JMeter JMX，生成一个完整的 Test Plan、Thread Group、HTTP Sampler、Header Manager、Cookie Manager、断言与结果查看器。
+- 该脚本将 Fiddler 或浏览器导出的 HAR 转换成可直接运行的 JMeter JMX，生成一个完整的 Test Plan、Thread Group、HTTP Sampler、Header Manager、Cookie Manager、断言与结果查看器。
 - 会读取 HAR 中的 log.entries，过滤静态资源请求（按扩展名、常见静态目录、响应 MIME 类型、OPTIONS 方法等规则）以减少无效采样器。
 - 自动识别并关联动态参数：从 JSON/JavaScript/HTML 响应体、响应头与 Set-Cookie 中提取候选动态值；只在后续请求真正引用时才创建对应的提取器，避免无用关联。
 - 请求构造规则：
@@ -902,5 +902,6 @@ if __name__ == "__main__":
     output_path = sys.argv[2] if len(sys.argv) >= 3 else None
     converter = HarToJmxConverter(har_path)
     converter.convert(output_path)
+
 
 
