@@ -56,24 +56,43 @@ from lxml import etree
 
 class HarToJmxConverter:
     # Common static resource extensions to exclude
+    # 过滤清单，排除一下静态资源请求集合
     EXCLUDE_EXTS = {
         ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico",
         ".woff", ".woff2", ".ttf", ".ttc", ".eot", ".otf", ".svg",
         ".map", ".bmp", ".webp", ".mp4", ".mp3", ".avi", ".mov",
         ".m4a", ".pdf", ".zip", ".rar", ".7z", ".gz", ".tar", ".tgz"
     }
+
+    EXCLUDED_REQUEST_HEADERS = {
+        "host", "content-length", "cookie"
+    }
+
+    STRIP_BROWSER_HINT_HEADERS = True
+    ENABLE_RESPONSE_ASSERTION = True
+    ASSERT_BY_STATUS_CODE = True
+    INCLUDE_DEBUG_COMPONENTS = True
+    STRICT_SUCCESS_STATUS_CODES = tuple(str(code) for code in range(200, 400))
+
+    # 用于识别Cookie中可能包含会话、鉴权或安全相关信息的键名集合
     COOKIE_EXTRACT_KEYS = {
         "leid", "sessionid", "jsessionid", "sid", "uid",
         "token", "access_token", "refresh_token", "auth", "jwt"
     }
+
+    # 用于识别Header中可能包含会话、鉴权或安全相关信息的键名集合
     HEADER_EXTRACT_KEYS = {
         "x-csrf-token", "x-xsrf-token", "x-auth-token",
         "authorization", "x-session-id"
     }
+
+    # 在 HTML 内容中搜索潜在凭据或标记字段的关键词集合
     HTML_KEY_HINTS = {
         "token", "csrf", "xsrf", "session", "sid", "auth", "nonce",
         "signature", "sign", "uid", "user", "guid", "jwt"
     }
+
+    # 响应成功标识符
     SUCCESS_MARKERS = [
         '"status": 200',
         '"status" : 200',
@@ -82,6 +101,7 @@ class HarToJmxConverter:
         '"success": true',
         '"success" : true'
     ]
+
     VAR_PREFIX_STRIP = (
         "cookie_",
         "json_0__",
@@ -100,6 +120,10 @@ class HarToJmxConverter:
         self._parse_har()
 
     def _parse_har(self):
+        """
+        解析 HAR 文件，过滤掉静态资源请求，仅保留业务相关请求。
+        统计总请求数、过滤数、保留数。
+        """
         with open(self.har_path, "r", encoding="utf-8-sig") as f:
             har_data = json.load(f)
         raw_entries = har_data.get("log", {}).get("entries", [])
@@ -117,10 +141,14 @@ class HarToJmxConverter:
         )
 
     def _is_static_entry(self, entry: dict) -> bool:
+        """
+        判断 HAR entry 是否为静态资源请求（如图片、JS、CSS、音视频等），用于过滤无效采样器。
+        """
         req = entry.get("request", {})
         url = req.get("url", "") or ""
         parsed = urlparse(url)
         path = parsed.path or ""
+        path_l = path.lower()
 
         method = (req.get("method") or "").upper()
         if method == "OPTIONS":
@@ -135,7 +163,7 @@ class HarToJmxConverter:
 
         # Heuristic for common static directories
         static_dir_markers = ("/static/", "/assets/", "/img/", "/images/", "/fonts/", "/media/")
-        if any(marker in path.lower() for marker in static_dir_markers) and method == "GET":
+        if any(marker in path_l for marker in static_dir_markers) and method == "GET":
             return True
 
         mime = entry.get("response", {}).get("content", {}).get("mimeType", "").lower()
@@ -155,6 +183,9 @@ class HarToJmxConverter:
         return False
 
     def _is_dynamic_value(self, value: str) -> bool:
+        """
+        判断一个值是否为动态参数（如 token、session、id 等），用于后续变量提取。
+        """
         if not isinstance(value, str) or value.strip() == "":
             return False
 
@@ -193,18 +224,27 @@ class HarToJmxConverter:
         return False
 
     def _is_likely_json(self, text: str) -> bool:
+        """
+        判断文本是否为标准 JSON 格式。
+        """
         if not text or not isinstance(text, str):
             return False
         s = text.strip()
         return (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))
 
     def _looks_like_json_value(self, text: str) -> bool:
+        """
+        判断文本是否为 JSON 对象或数组（用于参数值判断）。
+        """
         if not text or not isinstance(text, str):
             return False
         s = text.strip()
         return (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))
 
     def _decode_response_text(self, content: dict) -> str:
+        """
+        解码响应体内容，支持 base64 和明文。
+        """
         text = content.get("text", "")
         if not text:
             return ""
@@ -221,21 +261,35 @@ class HarToJmxConverter:
         return text
 
     def _should_extract_key(self, key: str) -> bool:
+        """
+        判断字段名是否为潜在的动态参数（如 token、session 等）。
+        """
         if not key:
             return False
         key_l = key.lower()
         return any(hint in key_l for hint in self.HTML_KEY_HINTS)
 
     def _normalize_var_name(self, name: str) -> str:
+        """
+        变量名规范化，去除前缀、特殊字符，保证 JMeter 变量合法。
+        """
         if not name:
-            return name
+            return "v"
         for prefix in self.VAR_PREFIX_STRIP:
             if name.startswith(prefix):
                 name = name[len(prefix):]
                 break
-        return name.lstrip("_") or name
+        normalized = re.sub(r"[^A-Za-z0-9_]", "_", name).lstrip("_")
+        if not normalized:
+            normalized = "v"
+        if not re.match(r"^[A-Za-z_]", normalized):
+            normalized = f"v_{normalized}"
+        return normalized
 
     def _encode_query_value(self, value: str) -> tuple[str, str]:
+        """
+        判断参数值是否需要 URL Encode，返回（值, always_encode）。
+        """
         if not isinstance(value, str):
             return value, "true"
         if "${" in value:
@@ -245,6 +299,10 @@ class HarToJmxConverter:
         return value, "true"
 
     def _extract_dynamic_params(self):
+        """
+        遍历所有响应，自动识别并收集所有可提取的动态参数。
+        支持 JSON、HTML、Header、Cookie 场景。
+        """
         self.dynamic_params.clear()
         self.value_to_var.clear()
 
@@ -260,9 +318,11 @@ class HarToJmxConverter:
 
             if "json" in mime or "javascript" in mime:
                 try:
-                    text_clean = re.sub(r"^[\w$\.]+\((.*)\)\s*;?$", r"\1", text, flags=re.S)
+                    wrapped_match = re.match(r"^\s*[^\(]+\((.*)\)\s*;?\s*$", text, flags=re.S)
+                    is_wrapped_json = bool(wrapped_match)
+                    text_clean = wrapped_match.group(1) if wrapped_match else text
                     json_data = json.loads(text_clean)
-                    self._extract_from_json(json_data, source_idx)
+                    self._extract_from_json(json_data, source_idx, prefer_regex=is_wrapped_json)
                 except Exception:
                     pass
             elif "html" in mime or mime.startswith("text/"):
@@ -304,6 +364,9 @@ class HarToJmxConverter:
                             self.value_to_var[cookie_val] = var_name
 
     def _extract_from_html(self, text: str, source_idx: int):
+        """
+        从 HTML 响应体中提取隐藏字段、meta 标签等潜在动态参数。
+        """
         if not text:
             return
 
@@ -348,44 +411,125 @@ class HarToJmxConverter:
                     self.dynamic_params.append((val, var_name, source_idx, "regex", regex_expr))
                     self.value_to_var[val] = var_name
 
-    def _extract_from_json(self, json_data, source_idx: int):
+    def _build_json_key_regex(self, segments: list) -> str:
+        """
+        根据 JSON 路径段生成正则表达式，用于兜底提取。
+        """
+        keys = [str(seg) for seg in segments if isinstance(seg, str)]
+        if not keys:
+            return r'"([^"\\r\\n,}\]]+)"'
+
+        child = re.escape(keys[-1])
+        if len(keys) >= 2:
+            parent = re.escape(keys[-2])
+            return rf'"{parent}"\s*:\s*[\[{{][\s\S]*?"{child}"\s*:\s*"?([^"\\r\\n,}}\]]+)"?'
+        return rf'"{child}"\s*:\s*"?([^"\\r\\n,}}\]]+)"?'
+
+    def _build_json_key_regex_escaped(self, segments: list) -> str:
+        """
+        生成转义版 JSON key 的正则表达式（用于部分响应体被转义的场景）。
+        """
+        keys = [str(seg) for seg in segments if isinstance(seg, str)]
+        if not keys:
+            return r'\\"([^\\"\\r\\n,}\]]+)\\"'
+
+        child = re.escape(keys[-1])
+        if len(keys) >= 2:
+            parent = re.escape(keys[-2])
+            return rf'\\"{parent}\\"\s*:\s*[\[{{][\s\S]*?\\"{child}\\"\s*:\s*\\"?([^\\"\\r\\n,}}\]]+)\\"?'
+        return rf'\\"{child}\\"\s*:\s*\\"?([^\\"\\r\\n,}}\]]+)\\"?'
+
+    def _json_path_to_segments(self, json_path: str) -> list:
+        """
+        将 JSONPath 表达式解析为路径段列表。
+        """
+        if not json_path or not json_path.startswith("$"):
+            return []
+        segments = []
+        for part in re.findall(r"\[(.*?)\]", json_path):
+            token = part.strip()
+            if token.isdigit():
+                segments.append(int(token))
+            elif len(token) >= 2 and token[0] == "'" and token[-1] == "'":
+                key = token[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+                segments.append(key)
+        return segments
+
+    def _extract_from_json(self, json_data, source_idx: int, prefer_regex: bool = False):
+        """
+        遍历 JSON 数据，递归提取所有动态参数。
+        prefer_regex=True 时优先生成正则提取器。
+        """
         step_no = source_idx + 1
 
-        def traverse(obj, path=""):
+        def to_json_path(segments: list) -> str:
+            path = "$"
+            for seg in segments:
+                if isinstance(seg, int):
+                    path += f"[{seg}]"
+                else:
+                    key = str(seg).replace("\\", "\\\\").replace("'", "\\'")
+                    path += f"['{key}']"
+            return path
+
+        def traverse(obj, segments=None):
+            if segments is None:
+                segments = []
             if isinstance(obj, dict):
                 for k, v in obj.items():
-                    if re.match(r"^[a-zA-Z0-9_]+$", k):
-                        new_path = f"{path}.{k}" if path else k
-                    else:
-                        new_path = f"{path}['{k}']" if path else f"['{k}']"
-                    traverse(v, new_path)
+                    traverse(v, segments + [k])
             elif isinstance(obj, list):
                 for i, item in enumerate(obj):
-                    traverse(item, f"{path}[{i}]")
+                    traverse(item, segments + [i])
             else:
                 val_str = str(obj).strip()
                 if self._is_dynamic_value(val_str):
-                    safe_path = re.sub(r"[^\w]", "_", path).strip("_")
+                    safe_path = re.sub(r"[^\w]", "_", "_".join(str(x) for x in segments)).strip("_")
                     var_name = f"json_{safe_path}_{step_no}"
                     var_name = self._normalize_var_name(var_name)
                     if val_str not in self.value_to_var:
-                        json_path = f"$.{path}"
-                        self.dynamic_params.append((val_str, var_name, source_idx, "json", json_path))
+                        if prefer_regex:
+                            expr = self._build_json_key_regex(segments)
+                            extractor_type = "regex"
+                        else:
+                            expr = to_json_path(segments)
+                            extractor_type = "json"
+                        self.dynamic_params.append((val_str, var_name, source_idx, extractor_type, expr))
                         self.value_to_var[val_str] = var_name
         traverse(json_data)
 
+    def _replace_value_with_boundary(self, content: str, value: str, replacement: str) -> str:
+        """
+        替换内容中的指定值为变量引用，避免误替换短字符串。
+        """
+        if not value:
+            return content
+
+        is_short_alnum = len(value) <= 12 and value.isalnum()
+        if not is_short_alnum:
+            return content.replace(value, replacement)
+
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(value)}(?![A-Za-z0-9_])"
+        return re.sub(pattern, replacement, content)
+
     def _replace_dynamic_values(self, content: str, current_idx: int) -> str:
+        """
+        替换请求内容中的动态参数为变量引用，保证变量链路。
+        """
         if not content:
             return content
 
         sorted_params = sorted(self.dynamic_params, key=lambda x: len(x[0]), reverse=True)
         for value, var_name, source_idx, *_ in sorted_params:
             if source_idx < current_idx and value in content:
-                content = content.replace(value, f"${{{var_name}}}")
+                content = self._replace_value_with_boundary(content, value, f"${{{var_name}}}")
                 self.used_vars.add(var_name)
         return content
 
     def _replace_dynamic_in_json_text(self, text: str, current_idx: int) -> str:
+        """
+        针对 JSON 字符串递归替换动态参数为变量引用。
+        """
         if not text:
             return text
         try:
@@ -422,6 +566,9 @@ class HarToJmxConverter:
             return text
 
     def _scan_used_variables(self):
+        """
+        扫描所有请求，统计实际被引用的变量，避免生成无用提取器。
+        """
         self.used_vars.clear()
         for idx, entry in enumerate(self.entries):
             req = entry.get("request", {})
@@ -470,6 +617,9 @@ class HarToJmxConverter:
                     _ = self._replace_dynamic_values(post_text, idx)
 
     def _parse_form_text(self, text: str) -> list:
+        """
+        解析 x-www-form-urlencoded 格式字符串为参数对。
+        """
         params = []
         if not text:
             return params
@@ -485,26 +635,29 @@ class HarToJmxConverter:
         return params
 
     def _build_full_path(self, path: str, query_string: list, method: str) -> str:
+        """
+        构造带参数的完整路径，主要用于 POST 请求。
+        """
         if method != "POST" or not query_string:
             return path
 
-        query_params = {}
+        pairs = []
         for item in query_string:
             k = (item.get("name") or "").strip()
             v = (item.get("value") or "").strip()
-            if k:
-                query_params[k] = v
-
-        pairs = []
-        for k, v in query_params.items():
+            if not k:
+                continue
             enc_val, _ = self._encode_query_value(v)
-            pairs.append(f"{quote(k, safe='') if k else k}={enc_val}")
+            pairs.append(f"{quote(k, safe='')}={enc_val}")
         query_str = "&".join(pairs)
         if "?" in path:
             return f"{path}&{query_str}"
         return f"{path}?{query_str}"
 
     def _add_query_params_to_arguments(self, sampler: etree.Element, query_string: list, current_idx: int):
+        """
+        将查询参数添加到采样器 Arguments，所有参数默认 URL Encode。
+        """
         args = etree.SubElement(sampler, "elementProp", name="HTTPsampler.Arguments", elementType="Arguments")
         args_coll = etree.SubElement(args, "collectionProp", name="Arguments.arguments")
 
@@ -522,6 +675,9 @@ class HarToJmxConverter:
                 etree.SubElement(arg, "stringProp", name="Argument.metadata").text = "="
 
     def _create_http_sampler(self, entry: dict, idx: int) -> etree.Element:
+        """
+        构造 JMeter HTTP Sampler，支持 GET/POST/多种 body 类型，自动变量替换。
+        """
         req = entry["request"]
         method = req["method"].upper()
         full_url = req["url"]
@@ -563,6 +719,7 @@ class HarToJmxConverter:
             post_text = post_data.get("text", "")
             post_params = post_data.get("params", [])
 
+
             if self._is_likely_json(post_text):
                 raw_body = self._replace_dynamic_in_json_text(post_text, idx)
                 etree.SubElement(sampler, "boolProp", name="HTTPSampler.postBodyRaw").text = "true"
@@ -586,6 +743,7 @@ class HarToJmxConverter:
                         v = param.get("value", "").strip()
                         if k:
                             replaced = self._replace_dynamic_values(v, idx)
+                            replaced, _ = self._encode_query_value(replaced)
                             arg = etree.SubElement(args_coll, "elementProp", name=k, elementType="HTTPArgument")
                             etree.SubElement(arg, "boolProp", name="HTTPArgument.always_encode").text = "true"
                             etree.SubElement(arg, "boolProp", name="HTTPArgument.use_equals").text = "true"
@@ -597,6 +755,7 @@ class HarToJmxConverter:
                     for k, v in form_params:
                         if k:
                             replaced = self._replace_dynamic_values(v, idx)
+                            replaced, _ = self._encode_query_value(replaced)
                             arg = etree.SubElement(args_coll, "elementProp", name=k, elementType="HTTPArgument")
                             etree.SubElement(arg, "boolProp", name="HTTPArgument.always_encode").text = "true"
                             etree.SubElement(arg, "boolProp", name="HTTPArgument.use_equals").text = "true"
@@ -626,89 +785,113 @@ class HarToJmxConverter:
 
         return sampler
 
-    def _create_extractor(self, var_name: str, extractor_type: str, expr: str) -> etree.Element:
+    def _create_regex_extractor(
+        # 创建正则提取器，所有 RegexExtractor 默认勾选 Use empty default value。
+        self,
+        var_name: str,
+        expr: str,
+        default_value: str,
+        testname_suffix: str = "regex",
+        use_empty_default: bool = False  # 参数保留但不再影响行为
+    ) -> etree.Element:
+        extractor = etree.Element(
+            "RegexExtractor",
+            guiclass="RegexExtractorGui",
+            testclass="RegexExtractor",
+            testname=f"Extract {var_name} ({testname_suffix})",
+            enabled="true"
+        )
+        etree.SubElement(extractor, "boolProp", name="RegexExtractor.useHeaders").text = "false"
+        etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBody").text = "true"
+        etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBodyAsDocument").text = "false"
+        etree.SubElement(extractor, "boolProp", name="RegexExtractor.useUrl").text = "false"
+        etree.SubElement(extractor, "boolProp", name="RegexExtractor.useCode").text = "false"
+
+        etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
+        etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
+        etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
+        etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = default_value
+        # 所有正则提取器都强制勾选 Use empty default value
+        etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
+        etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
+        return extractor
+
+    def _create_extractor(self, var_name: str, extractor_type: str, expr: str, default_value: str, resp_mime: str = None) -> list:
+        """
+        根据提取类型和响应类型生成最佳提取器（JSON优先，否则正则/Header/Cookie）。
+        """
+        # JSON 响应优先用 JSON 提取器
         if extractor_type == "json":
-            extractor = etree.Element(
+            json_extractor = etree.Element(
                 "JSONPostProcessor",
                 guiclass="JSONPostProcessorGui",
                 testclass="JSONPostProcessor",
                 testname=f"Extract {var_name}",
                 enabled="true"
             )
-            etree.SubElement(extractor, "stringProp", name="JSONPostProcessor.referenceNames").text = var_name
-            etree.SubElement(extractor, "stringProp", name="JSONPostProcessor.jsonPathExprs").text = expr
-            etree.SubElement(extractor, "stringProp", name="JSONPostProcessor.match_numbers").text = "1"
-            etree.SubElement(extractor, "stringProp", name="JSONPostProcessor.defaultValues").text = f"{var_name}_EXTRACT_FAIL"
-            return extractor
+            etree.SubElement(json_extractor, "stringProp", name="JSONPostProcessor.referenceNames").text = var_name
+            etree.SubElement(json_extractor, "stringProp", name="JSONPostProcessor.jsonPathExprs").text = expr
+            etree.SubElement(json_extractor, "stringProp", name="JSONPostProcessor.match_numbers").text = "1"
+            etree.SubElement(json_extractor, "stringProp", name="JSONPostProcessor.defaultValues").text = ""
+            return [json_extractor]
 
-        if extractor_type == "cookie":
-            extractor = etree.Element(
-                "RegexExtractor",
-                guiclass="RegexExtractorGui",
-                testclass="RegexExtractor",
-                testname=f"Extract {var_name} (cookie)",
-                enabled="true"
-            )
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useHeaders").text = "true"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBody").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBodyAsDocument").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useUrl").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useCode").text = "false"
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
-            return extractor
-
-        if extractor_type == "header":
-            extractor = etree.Element(
-                "RegexExtractor",
-                guiclass="RegexExtractorGui",
-                testclass="RegexExtractor",
-                testname=f"Extract {var_name} (header)",
-                enabled="true"
-            )
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useHeaders").text = "true"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBody").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBodyAsDocument").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useUrl").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useCode").text = "false"
-
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
-            return extractor
-
-        if extractor_type == "regex":
-            extractor = etree.Element(
-                "RegexExtractor",
-                guiclass="RegexExtractorGui",
-                testclass="RegexExtractor",
-                testname=f"Extract {var_name} (regex)",
-                enabled="true"
-            )
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useHeaders").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBody").text = "true"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBodyAsDocument").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useUrl").text = "false"
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.useCode").text = "false"
-
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
-            etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
-            etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
-            return extractor
-
-        return etree.Element("hashTree")
+        # 其他类型一律只生成一个正则提取器
+        if extractor_type in ("regex", "cookie", "header"):
+            if extractor_type == "cookie":
+                extractor = etree.Element(
+                    "RegexExtractor",
+                    guiclass="RegexExtractorGui",
+                    testclass="RegexExtractor",
+                    testname=f"Extract {var_name} (cookie)",
+                    enabled="true"
+                )
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useHeaders").text = "true"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBody").text = "false"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBodyAsDocument").text = "false"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useUrl").text = "false"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useCode").text = "false"
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
+                return [extractor]
+            if extractor_type == "header":
+                extractor = etree.Element(
+                    "RegexExtractor",
+                    guiclass="RegexExtractorGui",
+                    testclass="RegexExtractor",
+                    testname=f"Extract {var_name} (header)",
+                    enabled="true"
+                )
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useHeaders").text = "true"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBody").text = "false"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useBodyAsDocument").text = "false"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useUrl").text = "false"
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.useCode").text = "false"
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.refname").text = var_name
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.regex").text = expr
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.template").text = "$1$"
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.default").text = ""
+                etree.SubElement(extractor, "boolProp", name="RegexExtractor.default_empty_value").text = "true"
+                etree.SubElement(extractor, "stringProp", name="RegexExtractor.match_number").text = "1"
+                return [extractor]
+            # 普通正则
+            escaped_expr = expr
+            if expr.count('"') >= 2:
+                escaped_expr = expr.replace('"', '\\"')
+            primary = self._create_regex_extractor(var_name, expr, "", "regex", use_empty_default=True)
+            return [primary]
+        return []
 
     def _create_assertions(self) -> list:
+        """
+        自动生成基础响应断言，支持状态码或响应内容。
+        """
+        if not self.ENABLE_RESPONSE_ASSERTION:
+            return []
+
         response_assert = etree.Element(
             "ResponseAssertion",
             guiclass="AssertionGui",
@@ -717,16 +900,27 @@ class HarToJmxConverter:
             enabled="true"
         )
         etree.SubElement(response_assert, "boolProp", name="Assertion.assume_success").text = "false"
-        etree.SubElement(response_assert, "stringProp", name="Assertion.test_field").text = "Assertion.response_data"
-        etree.SubElement(response_assert, "intProp", name="Assertion.test_type").text = "0"
         etree.SubElement(response_assert, "boolProp", name="Assertion.OR").text = "true"
-        test_coll = etree.SubElement(response_assert, "collectionProp", name="Assertion.test_strings")
-        for marker in self.SUCCESS_MARKERS:
-            etree.SubElement(test_coll, "stringProp", name="").text = marker
+
+        if self.ASSERT_BY_STATUS_CODE:
+            etree.SubElement(response_assert, "stringProp", name="Assertion.test_field").text = "Assertion.response_code"
+            etree.SubElement(response_assert, "intProp", name="Assertion.test_type").text = "1"
+            test_coll = etree.SubElement(response_assert, "collectionProp", name="Assertion.test_strings")
+            for code in self.STRICT_SUCCESS_STATUS_CODES:
+                etree.SubElement(test_coll, "stringProp", name="").text = code
+        else:
+            etree.SubElement(response_assert, "stringProp", name="Assertion.test_field").text = "Assertion.response_data"
+            etree.SubElement(response_assert, "intProp", name="Assertion.test_type").text = "0"
+            test_coll = etree.SubElement(response_assert, "collectionProp", name="Assertion.test_strings")
+            for marker in self.SUCCESS_MARKERS:
+                etree.SubElement(test_coll, "stringProp", name="").text = marker
 
         return [response_assert]
 
     def convert(self, output_path: str = None):
+        """
+        主入口：执行 HAR→JMX 转换，生成完整 JMeter 脚本。
+        """
         self._extract_dynamic_params()
         print(f"Dynamic params extracted: {len(self.dynamic_params)}")
         self._scan_used_variables()
@@ -796,29 +990,46 @@ class HarToJmxConverter:
 
             headers = entry["request"].get("headers", [])
             if headers:
-                header_manager = etree.SubElement(
-                    sampler_ht, "HeaderManager",
-                    guiclass="HeaderPanel",
-                    testclass="HeaderManager",
-                    testname="HTTP Header Manager",
-                    enabled="true"
-                )
-                header_coll = etree.SubElement(header_manager, "collectionProp", name="HeaderManager.headers")
+                header_items = []
                 for h in headers:
                     name = h.get("name", "").strip()
                     value = h.get("value", "").strip()
-                    if name:
-                        replaced_value = self._replace_dynamic_values(value, idx)
+                    if not name:
+                        continue
+                    lower_name = name.lower()
+                    if lower_name in self.EXCLUDED_REQUEST_HEADERS:
+                        continue
+                    if self.STRIP_BROWSER_HINT_HEADERS and lower_name.startswith("sec-ch-"):
+                        continue
+                    replaced_value = self._replace_dynamic_values(value, idx)
+                    header_items.append((name, replaced_value))
+
+                if header_items:
+                    header_manager = etree.SubElement(
+                        sampler_ht, "HeaderManager",
+                        guiclass="HeaderPanel",
+                        testclass="HeaderManager",
+                        testname="HTTP Header Manager",
+                        enabled="true"
+                    )
+                    header_coll = etree.SubElement(header_manager, "collectionProp", name="HeaderManager.headers")
+                    for name, value in header_items:
                         header_elem = etree.SubElement(header_coll, "elementProp", name="", elementType="Header")
                         etree.SubElement(header_elem, "stringProp", name="Header.name").text = name
-                        etree.SubElement(header_elem, "stringProp", name="Header.value").text = replaced_value
-                etree.SubElement(sampler_ht, "hashTree")
+                        etree.SubElement(header_elem, "stringProp", name="Header.value").text = value
+                    etree.SubElement(sampler_ht, "hashTree")
 
+            # 只为每个动态参数选择一个最佳提取器
+            # 需判断响应类型
+            resp = entry.get("response", {})
+            content = resp.get("content", {})
+            mime = content.get("mimeType", "").lower()
             for value, var_name, source_idx, extractor_type, expr in self.dynamic_params:
                 if source_idx == idx and var_name in self.used_vars:
-                    extractor = self._create_extractor(var_name, extractor_type, expr)
-                    sampler_ht.append(extractor)
-                    etree.SubElement(sampler_ht, "hashTree")
+                    extractors = self._create_extractor(var_name, extractor_type, expr, value, resp_mime=mime)
+                    for extractor in extractors:
+                        sampler_ht.append(extractor)
+                        etree.SubElement(sampler_ht, "hashTree")
 
             for assertion in self._create_assertions():
                 sampler_ht.append(assertion)
@@ -830,49 +1041,50 @@ class HarToJmxConverter:
             testclass="DebugSampler",
             testname="Debug Sampler",
             enabled="true"
-        )
-        etree.SubElement(thread_group_ht, "hashTree")
+        ) if self.INCLUDE_DEBUG_COMPONENTS else None
+        if self.INCLUDE_DEBUG_COMPONENTS:
+            etree.SubElement(thread_group_ht, "hashTree")
 
-        results_tree = etree.SubElement(
-            thread_group_ht, "ResultCollector",
-            guiclass="ViewResultsFullVisualizer",
-            testclass="ResultCollector",
-            testname="View Results Tree",
-            enabled="true"
-        )
-        etree.SubElement(results_tree, "boolProp", name="ResultCollector.error_logging").text = "false"
-        save_config = etree.SubElement(results_tree, "objProp")
-        etree.SubElement(save_config, "name").text = "saveConfig"
-        save_value = etree.SubElement(save_config, "value", **{"class": "SampleSaveConfiguration"})
-        etree.SubElement(save_value, "time").text = "true"
-        etree.SubElement(save_value, "latency").text = "true"
-        etree.SubElement(save_value, "timestamp").text = "true"
-        etree.SubElement(save_value, "success").text = "true"
-        etree.SubElement(save_value, "label").text = "true"
-        etree.SubElement(save_value, "code").text = "true"
-        etree.SubElement(save_value, "message").text = "true"
-        etree.SubElement(save_value, "threadName").text = "true"
-        etree.SubElement(save_value, "dataType").text = "true"
-        etree.SubElement(save_value, "encoding").text = "false"
-        etree.SubElement(save_value, "assertions").text = "true"
-        etree.SubElement(save_value, "subresults").text = "true"
-        etree.SubElement(save_value, "responseData").text = "false"
-        etree.SubElement(save_value, "samplerData").text = "false"
-        etree.SubElement(save_value, "xml").text = "false"
-        etree.SubElement(save_value, "fieldNames").text = "true"
-        etree.SubElement(save_value, "responseHeaders").text = "false"
-        etree.SubElement(save_value, "requestHeaders").text = "false"
-        etree.SubElement(save_value, "responseDataOnError").text = "false"
-        etree.SubElement(save_value, "saveAssertionResultsFailureMessage").text = "true"
-        etree.SubElement(save_value, "assertionsResultsToSave").text = "0"
-        etree.SubElement(save_value, "bytes").text = "true"
-        etree.SubElement(save_value, "sentBytes").text = "true"
-        etree.SubElement(save_value, "url").text = "true"
-        etree.SubElement(save_value, "threadCounts").text = "true"
-        etree.SubElement(save_value, "idleTime").text = "true"
-        etree.SubElement(save_value, "connectTime").text = "true"
-        etree.SubElement(results_tree, "stringProp", name="filename").text = ""
-        etree.SubElement(thread_group_ht, "hashTree")
+            results_tree = etree.SubElement(
+                thread_group_ht, "ResultCollector",
+                guiclass="ViewResultsFullVisualizer",
+                testclass="ResultCollector",
+                testname="View Results Tree",
+                enabled="true"
+            )
+            etree.SubElement(results_tree, "boolProp", name="ResultCollector.error_logging").text = "false"
+            save_config = etree.SubElement(results_tree, "objProp")
+            etree.SubElement(save_config, "name").text = "saveConfig"
+            save_value = etree.SubElement(save_config, "value", **{"class": "SampleSaveConfiguration"})
+            etree.SubElement(save_value, "time").text = "true"
+            etree.SubElement(save_value, "latency").text = "true"
+            etree.SubElement(save_value, "timestamp").text = "true"
+            etree.SubElement(save_value, "success").text = "true"
+            etree.SubElement(save_value, "label").text = "true"
+            etree.SubElement(save_value, "code").text = "true"
+            etree.SubElement(save_value, "message").text = "true"
+            etree.SubElement(save_value, "threadName").text = "true"
+            etree.SubElement(save_value, "dataType").text = "true"
+            etree.SubElement(save_value, "encoding").text = "false"
+            etree.SubElement(save_value, "assertions").text = "true"
+            etree.SubElement(save_value, "subresults").text = "true"
+            etree.SubElement(save_value, "responseData").text = "false"
+            etree.SubElement(save_value, "samplerData").text = "false"
+            etree.SubElement(save_value, "xml").text = "false"
+            etree.SubElement(save_value, "fieldNames").text = "true"
+            etree.SubElement(save_value, "responseHeaders").text = "false"
+            etree.SubElement(save_value, "requestHeaders").text = "false"
+            etree.SubElement(save_value, "responseDataOnError").text = "false"
+            etree.SubElement(save_value, "saveAssertionResultsFailureMessage").text = "true"
+            etree.SubElement(save_value, "assertionsResultsToSave").text = "0"
+            etree.SubElement(save_value, "bytes").text = "true"
+            etree.SubElement(save_value, "sentBytes").text = "true"
+            etree.SubElement(save_value, "url").text = "true"
+            etree.SubElement(save_value, "threadCounts").text = "true"
+            etree.SubElement(save_value, "idleTime").text = "true"
+            etree.SubElement(save_value, "connectTime").text = "true"
+            etree.SubElement(results_tree, "stringProp", name="filename").text = ""
+            etree.SubElement(thread_group_ht, "hashTree")
 
 
         if not output_path:
@@ -902,6 +1114,3 @@ if __name__ == "__main__":
     output_path = sys.argv[2] if len(sys.argv) >= 3 else None
     converter = HarToJmxConverter(har_path)
     converter.convert(output_path)
-
-
-
